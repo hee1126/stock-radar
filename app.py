@@ -2,6 +2,44 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
+import FinanceDataReader as fdr
+
+
+@st.cache_data(ttl=3600)
+def load_krx_stocks():
+    """국내 상장 종목 목록을 가져옵니다."""
+    stocks = fdr.StockListing("KRX")
+    stocks["Code"] = stocks["Code"].astype(str).str.zfill(6)
+    stocks = stocks.dropna(subset=["Code", "Name"])
+    return stocks[["Code", "Name", "Market"]].drop_duplicates()
+
+
+@st.cache_data(ttl=1800)
+def load_real_stock(code, name, start_date):
+    """종목의 과거 일별 시세를 가져옵니다."""
+    prices = fdr.DataReader(code, start_date)
+
+    if prices is None or prices.empty:
+        return pd.DataFrame()
+
+    prices = prices.reset_index()
+    prices = prices.rename(columns={
+        "Date": "date",
+        "Open": "open",
+        "High": "high",
+        "Low": "low",
+        "Close": "close",
+        "Volume": "volume",
+    })
+
+    prices["ticker"] = str(code).zfill(6)
+    prices["name"] = name
+
+    # 거래대금의 정확한 제공값이 없을 때 사용하는 추정치
+    prices["value"] = prices["close"] * prices["volume"]
+
+    return prices
+
 st.set_page_config(
     page_title="주식 레이더",
     page_icon="📡",
@@ -127,9 +165,12 @@ with st.sidebar:
     st.header("데이터")
     source = st.radio(
         "데이터 선택",
-        ["가상 데모 데이터", "내 시세 CSV 파일"]
+        ["가상 데모 데이터", "실제 국내 주식 데이터", "내 시세 CSV 파일"]
     )
+
     uploaded = None
+    selected_codes = []
+    start_date = "2023-01-01"
 
     if source == "내 시세 CSV 파일":
         uploaded = st.file_uploader(
@@ -137,16 +178,55 @@ with st.sidebar:
             type=["csv"]
         )
 
+    elif source == "실제 국내 주식 데이터":
+        try:
+            stock_list = load_krx_stocks()
+
+            stock_names = dict(
+                zip(stock_list["Code"], stock_list["Name"])
+            )
+
+            defaults = [
+                code for code in ["005930", "000660", "005380"]
+                if code in stock_names
+            ]
+
+            selected_codes = st.multiselect(
+                "분석할 종목 선택",
+                options=list(stock_names.keys()),
+                default=defaults,
+                format_func=lambda code:
+                    f"{stock_names[code]} ({code})"
+            )
+
+            years = st.selectbox(
+                "과거 데이터 기간",
+                ["1년", "2년", "3년"],
+                index=1
+            )
+
+            start_date = {
+                "1년": "2025-01-01",
+                "2년": "2024-01-01",
+                "3년": "2023-01-01",
+            }[years]
+
+        except Exception as e:
+            st.error(f"종목 목록을 가져오지 못했습니다: {e}")
+
     st.divider()
     st.header("검색기 조건")
+
     strategy = st.selectbox(
         "검색기",
         ["A · 거래량 급증", "B · 추세 돌파", "C · 거래량+추세"]
     )
+
     volume_threshold = st.slider(
         "거래량 / 20일 평균",
         1.0, 5.0, 2.0, 0.5
     )
+
     min_value = st.number_input(
         "최소 거래대금 (억원)",
         min_value=0,
@@ -154,26 +234,65 @@ with st.sidebar:
         value=10,
         step=10
     )
+
     holding_days = st.selectbox(
         "성과 확인 기간 (거래일)",
         [1, 3, 5, 10],
         index=2
     )
 
-
 try:
     if source == "가상 데모 데이터":
         raw = make_demo_data()
         is_demo = True
-    elif uploaded is not None:
+
+    elif source == "내 시세 CSV 파일":
+        if uploaded is None:
+            st.info("먼저 CSV 파일을 올려 주세요.")
+            st.stop()
+
         raw = pd.read_csv(uploaded)
         is_demo = False
+
     else:
-        st.info(
-            "왼쪽에서 CSV 파일을 올리거나 "
-            "가상 데모 데이터를 선택해 주세요."
+        if not selected_codes:
+            st.info("분석할 국내 주식을 선택해 주세요.")
+            st.stop()
+
+        stock_names = dict(
+            zip(stock_list["Code"], stock_list["Name"])
         )
-        st.stop()
+
+        frames = []
+        progress = st.progress(0)
+        status = st.empty()
+
+        for i, code in enumerate(selected_codes):
+            name = stock_names[code]
+
+            status.write(
+                f"실제 시세 조회 중: {name} ({code})"
+            )
+
+            prices = load_real_stock(code, name, start_date)
+
+            if not prices.empty:
+                frames.append(prices)
+
+            progress.progress((i + 1) / len(selected_codes))
+
+        progress.empty()
+        status.empty()
+
+        if not frames:
+            st.error(
+                "시세를 가져오지 못했습니다. "
+                "잠시 후 다시 시도하거나 다른 종목을 선택해 주세요."
+            )
+            st.stop()
+
+        raw = pd.concat(frames, ignore_index=True)
+        is_demo = False
 
     data = prepare_data(raw)
 
