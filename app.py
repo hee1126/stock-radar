@@ -277,18 +277,31 @@ with tab2:
     )
 
     rows = []
+
+    # 검색 화면과 동일한 조건으로 과거 신호를 검증합니다.
+    min_value_won = min_value * 100_000_000
+
     for ticker, g in data.groupby("ticker"):
         g = g.sort_values("date").reset_index(drop=True)
 
-        if signal_col not in g:
-            continue
-
-        # 다음 거래일 종가를 진입 기준으로 사용하고,
-        # 이후 지정한 거래일의 종가와 비교합니다.
         for i in range(len(g) - holding_days - 1):
-            if not bool(g.loc[i, signal_col]):
+            row = g.iloc[i]
+
+            # 선택한 검색기의 기본 조건
+            if not bool(row[signal_col]):
                 continue
 
+            # 화면에서 설정한 거래량 조건
+            if pd.isna(row["volume_ratio"]):
+                continue
+            if row["volume_ratio"] < volume_threshold:
+                continue
+
+            # 화면에서 설정한 최소 거래대금 조건
+            if pd.isna(row["value"]) or row["value"] < min_value_won:
+                continue
+
+            # 신호 다음 거래일 종가를 진입 가격으로 가정
             entry_i = i + 1
             exit_i = entry_i + holding_days
 
@@ -299,9 +312,12 @@ with tab2:
                 continue
 
             rows.append({
-                "종목명": g.loc[i, "name"],
-                "신호일": g.loc[i, "date"],
+                "종목명": row["name"],
+                "신호일": row["date"],
                 "진입일": g.loc[entry_i, "date"],
+                "청산일": g.loc[exit_i, "date"],
+                "진입가": entry,
+                "청산가": exit_price,
                 "수익률(%)": (exit_price / entry - 1) * 100,
             })
 
