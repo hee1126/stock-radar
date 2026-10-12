@@ -320,6 +320,7 @@ with tab2:
                 "청산가": exit_price,
                 "수익률(%)": (exit_price / entry - 1) * 100,
             })
+            
 
     bt = pd.DataFrame(rows)
 
