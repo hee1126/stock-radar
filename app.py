@@ -340,109 +340,78 @@ try:
 
 
 
-        # 기존에 추가한 중간 결과 표 갱신 코드는
-        # 이 위치에 그대로 유지하세요.
 
-            # 조회가 끝난 종목들의 최신 데이터로 중간 검색 결과 표시
-            if i % 10 == 0 or i == total:
-                if frames:
-                    partial_raw = pd.concat(frames, ignore_index=True)
-                    partial_data = prepare_data(partial_raw)
+                # 10개 종목마다 중간 검색 결과 갱신
+                if i % 10 == 0 or i == total:
+                    if frames:
+                        partial_raw = pd.concat(
+                            frames, ignore_index=True
+                        )
+                        partial_data = prepare_data(partial_raw)
 
-                    partial_latest = (
-                        partial_data.sort_values(["ticker", "date"])
-                        .groupby("ticker", sort=False)
-                        .tail(1)
-                        .copy()
-                    )
+                        partial_latest = (
+                            partial_data
+                            .sort_values(["ticker", "date"])
+                            .groupby("ticker", sort=False)
+                            .tail(1)
+                            .copy()
+                        )
 
-                    signal_col = {
-                        "A · 거래량 급증": "signal_A",
-                        "B · 추세 돌파": "signal_B",
-                        "C · 거래량+추세": "signal_C",
-                    }[strategy]
+                        signal_col = {
+                            "A · 거래량 급증": "signal_A",
+                            "B · 추세 돌파": "signal_B",
+                            "C · 거래량+추세": "signal_C",
+                        }[strategy]
 
-                    partial_latest["passed"] = (
-                        partial_latest[signal_col]
-                        & (partial_latest["volume_ratio"] >= volume_threshold)
-                        & (partial_latest["value"] >= min_value * 100_000_000)
-                    )
+                        partial_latest["passed"] = (
+                            partial_latest[signal_col]
+                            & (
+                                partial_latest["volume_ratio"]
+                                >= volume_threshold
+                            )
+                            & (
+                                partial_latest["value"]
+                                >= min_value * 100_000_000
+                            )
+                        )
 
-                    partial_results = partial_latest[
-                        partial_latest["passed"]
-                    ].copy()
+                        partial_results = partial_latest[
+                            partial_latest["passed"]
+                        ].copy()
 
-                    partial_results["거래량 배수"] = (
-                        partial_results["volume_ratio"].round(2)
-                    )
-                    partial_results["거래대금(억원)"] = (
-                        partial_results["value"] / 100_000_000
-                    ).round(1)
+                        partial_results["거래량 배수"] = (
+                            partial_results["volume_ratio"].round(2)
+                        )
+                        partial_results["거래대금(억원)"] = (
+                            partial_results["value"] / 100_000_000
+                        ).round(1)
 
-                    live_results_box.dataframe(
-                        partial_results[
-                            [
-                                "name", "ticker", "date", "close",
-                                "거래량 배수", "거래대금(억원)"
-                            ]
-                        ].rename(columns={
-                            "name": "종목명",
-                            "ticker": "종목코드",
-                            "date": "기준일",
-                            "close": "종가",
-                        }),
-                        width="stretch",
-                        hide_index=True
-                    )
-                else:
-                    live_results_box.info("아직 분석 가능한 시세 데이터가 없습니다.")
+                        live_results_box.dataframe(
+                            partial_results[
+                                [
+                                    "name",
+                                    "ticker",
+                                    "date",
+                                    "close",
+                                    "거래량 배수",
+                                    "거래대금(억원)",
+                                ]
+                            ].rename(
+                                columns={
+                                    "name": "종목명",
+                                    "ticker": "종목코드",
+                                    "date": "기준일",
+                                    "close": "종가",
+                                }
+                            ),
+                            width="stretch",
+                            hide_index=True,
+                        )
+                    else:
+                        live_results_box.info(
+                            "아직 분석 가능한 시세 데이터가 없습니다."
+                        )
 
-        if not frames:
-            st.error(
-                "시세를 가져오지 못했습니다. "
-                "잠시 후 다시 시도하거나 다른 종목을 선택해 주세요."
-            )
-            if failed_stocks:
-                with st.expander("조회 실패 상세"):
-                    st.write(failed_stocks[:100])
-            st.stop()
-
-        raw = pd.concat(frames, ignore_index=True)
-        is_demo = False
-
-        if failed_stocks:
-            with st.expander(
-                f"조회 실패 또는 데이터 없음: {len(failed_stocks):,}개"
-            ):
-                st.write(failed_stocks[:100])
-
-        status.success(
-            f"시세 조회 완료! 데이터 확보: {len(frames):,}개 종목"
-        )
-        detail.empty()
-
-    data = prepare_data(raw)
-
-except Exception as e:
-    st.error(f"데이터를 읽지 못했습니다: {e}")
-    st.stop()
-
-
-st.caption(
-    "데모 데이터 사용 중 — 실제 주식 시세가 아닙니다."
-    if is_demo else
-    "업로드한 파일을 분석 중입니다. "
-    "데이터 제공처와 거래대금 단위를 확인하세요."
-)
-
-latest_date = data["date"].max()
-latest = data[data["date"] == latest_date].copy()
-
-signal_col = {
-    "A · 거래량 급증": "signal_A",
-    "B · 추세 돌파": "signal_B",
-    "C · 거래량+추세": "signal_C",
-}[strategy]
 
 # 사용자가 설정한 거래량 조건을 반영합니다.
 latest["passed"] = (
