@@ -191,18 +191,29 @@ with st.sidebar:
                 zip(stock_list["Code"], stock_list["Name"])
             )
 
-            defaults = [
-                code for code in ["005930", "000660", "005380"]
-                if code in stock_names
-            ]
-
-            selected_codes = st.multiselect(
-                "분석할 종목 선택",
-                options=list(stock_names.keys()),
-                default=defaults,
-                format_func=lambda code:
-                    f"{stock_names[code]} ({code})"
+            all_codes = list(stock_names.keys())
+            analyze_all = st.checkbox(
+                "전체 종목 분석",
+                value=False,
+                help="종목 목록에 있는 모든 코드를 조회합니다. 종목 수가 많으면 오래 걸릴 수 있습니다."
             )
+
+            if analyze_all:
+                selected_codes = all_codes
+                st.caption(f"전체 분석 대상: {len(selected_codes):,}개 종목")
+            else:
+                defaults = [
+                    code for code in ["005930", "000660", "005380"]
+                    if code in stock_names
+                ]
+                selected_codes = st.multiselect(
+                    "분석할 종목 선택",
+                    options=all_codes,
+                    default=defaults,
+                    format_func=lambda code:
+                        f"{stock_names[code]} ({code})"
+                )
+                st.caption(f"선택한 종목: {len(selected_codes):,}개")
 
             years = st.selectbox(
                 "과거 데이터 기간",
@@ -278,25 +289,34 @@ try:
         )
 
         frames = []
+        failed_codes = []
         progress = st.progress(0)
         status = st.empty()
 
         for i, code in enumerate(selected_codes):
             name = stock_names[code]
-
             status.write(
-                f"실제 시세 조회 중: {name} ({code})"
+                f"실제 시세 조회 중 {i + 1:,}/{len(selected_codes):,}: {name} ({code})"
             )
-
-            prices = load_real_stock(code, name, start_date)
-
-            if not prices.empty:
-                frames.append(prices)
+            try:
+                prices = load_real_stock(code, name, start_date)
+                if not prices.empty:
+                    frames.append(prices)
+                else:
+                    failed_codes.append((code, name, "시세 데이터 없음"))
+            except Exception as exc:
+                failed_codes.append((code, name, str(exc)[:160]))
 
             progress.progress((i + 1) / len(selected_codes))
 
         progress.empty()
         status.empty()
+        st.session_state["stock_radar_failed_codes"] = failed_codes
+        if failed_codes:
+            st.warning(
+                f"{len(failed_codes):,}개 종목의 시세를 가져오지 못했습니다. "
+                "데이터 안내 탭에서 실패 종목을 확인할 수 있습니다."
+            )
 
         if not frames:
             st.error(
@@ -322,8 +342,14 @@ st.caption(
     "데이터 제공처와 거래대금 단위를 확인하세요."
 )
 
-latest_date = data["date"].max()
-latest = data[data["date"] == latest_date].copy()
+# 종목별 가장 최근에 확보된 거래일을 기준으로 검색합니다.
+latest = (
+    data.sort_values(["ticker", "date"])
+        .groupby("ticker", sort=False, as_index=False)
+        .tail(1)
+        .copy()
+)
+latest_date = latest["date"].max()
 
 signal_col = {
     "A · 거래량 급증": "signal_A",
@@ -362,6 +388,7 @@ with tab1:
     results = results.rename(columns={
         "name": "종목명",
         "ticker": "종목코드",
+        "date": "기준일",
         "close": "종가",
         "ma5": "5일선",
         "ma20": "20일선",
@@ -373,7 +400,7 @@ with tab1:
     else:
         st.dataframe(
             results[[
-                "종목명", "종목코드", "종가", "5일선",
+                "종목명", "종목코드", "기준일", "종가", "5일선",
                 "20일선", "60일선", "거래량 배수",
                 "거래대금(억원)"
             ]],
@@ -543,3 +570,10 @@ with tab3:
         "주의: 거래대금(value)은 원 단위로 입력해야 합니다. "
         "거래대금 열이 없으면 종가×거래량으로 추정합니다."
     )
+    failed_codes = st.session_state.get("stock_radar_failed_codes", [])
+    if failed_codes:
+        st.subheader("시세 조회 실패 종목")
+        failed_df = pd.DataFrame(
+            failed_codes, columns=["종목코드", "종목명", "사유"]
+        )
+        st.dataframe(failed_df, use_container_width=True, hide_index=True)
