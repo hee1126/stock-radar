@@ -325,6 +325,60 @@ try:
                 f"실패 또는 데이터 없음: {len(failed_stocks):,}개"
             )
 
+            # 조회가 끝난 종목들의 최신 데이터로 중간 검색 결과 표시
+            if i % 10 == 0 or i == total:
+                if frames:
+                    partial_raw = pd.concat(frames, ignore_index=True)
+                    partial_data = prepare_data(partial_raw)
+
+                    partial_latest = (
+                        partial_data.sort_values(["ticker", "date"])
+                        .groupby("ticker", sort=False)
+                        .tail(1)
+                        .copy()
+                    )
+
+                    signal_col = {
+                        "A · 거래량 급증": "signal_A",
+                        "B · 추세 돌파": "signal_B",
+                        "C · 거래량+추세": "signal_C",
+                    }[strategy]
+
+                    partial_latest["passed"] = (
+                        partial_latest[signal_col]
+                        & (partial_latest["volume_ratio"] >= volume_threshold)
+                        & (partial_latest["value"] >= min_value * 100_000_000)
+                    )
+
+                    partial_results = partial_latest[
+                        partial_latest["passed"]
+                    ].copy()
+
+                    partial_results["거래량 배수"] = (
+                        partial_results["volume_ratio"].round(2)
+                    )
+                    partial_results["거래대금(억원)"] = (
+                        partial_results["value"] / 100_000_000
+                    ).round(1)
+
+                    detail.dataframe(
+                        partial_results[
+                            [
+                                "name", "ticker", "date", "close",
+                                "거래량 배수", "거래대금(억원)"
+                            ]
+                        ].rename(columns={
+                            "name": "종목명",
+                            "ticker": "종목코드",
+                            "date": "기준일",
+                            "close": "종가",
+                        }),
+                        width="stretch",
+                        hide_index=True
+                    )
+                else:
+                    detail.info("아직 분석 가능한 시세 데이터가 없습니다.")
+
         if not frames:
             st.error(
                 "시세를 가져오지 못했습니다. "
