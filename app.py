@@ -122,8 +122,14 @@ def prepare_data(df):
     df = df.sort_values(["ticker", "date"])
     df = df.drop_duplicates(["ticker", "date"], keep="last")
 
+    # open은 다음 거래일 진입 가격에 사용합니다. CSV에 없어도 앱은 실행됩니다.
+    if "open" in df.columns:
+        df["open"] = pd.to_numeric(df["open"], errors="coerce")
+
     if "value" in df.columns:
         df["value"] = pd.to_numeric(df["value"], errors="coerce")
+        # 거래대금이 비어 있는 행은 종가×거래량으로 추정합니다.
+        df["value"] = df["value"].fillna(df["close"] * df["volume"])
     else:
         # 거래대금 실제 값이 없으면 종가×거래량으로 추정합니다.
         df["value"] = df["close"] * df["volume"]
@@ -135,24 +141,23 @@ def prepare_data(df):
         g["ma5"] = g["close"].rolling(5).mean()
         g["ma20"] = g["close"].rolling(20).mean()
         g["ma60"] = g["close"].rolling(60).mean()
-        g["vol20"] = g["volume"].rolling(20).mean()
-        g["value20"] = g["value"].rolling(20).mean()
+        # 당일을 제외한 직전 20거래일 평균을 기준으로 사용합니다.
+        g["vol20"] = g["volume"].shift(1).rolling(20).mean()
+        g["value20"] = g["value"].shift(1).rolling(20).mean()
         g["high20"] = g["close"].shift(1).rolling(20).max()
 
-        # 과거 데이터만으로 신호를 계산합니다.
+        # 검색기의 기본 조건과 사용자가 정한 거래량 배수 조건을 분리합니다.
+        # 이렇게 해야 슬라이더 값이 검색과 검증 양쪽에 똑같이 적용됩니다.
         g["volume_ratio"] = g["volume"] / g["vol20"]
         g["value_ratio"] = g["value"] / g["value20"]
-        g["signal_A"] = (
-            (g["volume_ratio"] >= 2)
-            & (g["close"] > g["ma5"])
-        )
+        g["signal_A"] = g["close"] > g["ma5"]
         g["signal_B"] = (
             (g["close"] > g["ma20"])
             & (g["ma5"] > g["ma20"])
             & (g["ma20"] > g["ma60"])
             & (g["close"] > g["high20"])
         )
-        g["signal_C"] = g["signal_A"] & (
+        g["signal_C"] = (
             (g["ma5"] > g["ma20"])
             & (g["close"] > g["ma20"])
         )
@@ -239,6 +244,15 @@ with st.sidebar:
         "성과 확인 기간 (거래일)",
         [1, 3, 5, 10],
         index=2
+    )
+
+    round_trip_cost_pct = st.number_input(
+        "왕복 거래 비용 추정치 (%)",
+        min_value=0.0,
+        max_value=3.0,
+        value=0.3,
+        step=0.05,
+        help="매수·매도 수수료, 세금, 슬리피지를 합친 사용자의 추정치입니다. 실제 비용에 맞게 조정하세요."
     )
 
 try:
@@ -390,75 +404,113 @@ with tab1:
 with tab2:
     st.subheader("검색 신호 이후의 과거 수익률")
     st.caption(
-        "신호가 발생한 종가에 매수했다고 가정한 단순 계산입니다. "
-        "실제 체결 가능 가격, 수수료, 세금, 슬리피지는 "
-        "반영하지 않습니다."
+        "신호가 발생한 다음 거래일의 시가를 진입 가격으로 사용하고, "
+        "설정한 보유 거래일 수에 맞춰 청산합니다. "
+        "왕복 거래 비용은 입력한 추정치를 단순 차감합니다."
     )
 
+    if "open" not in data.columns or data["open"].isna().all():
+        st.warning(
+            "데이터에 시가(open)가 없어 다음 거래일 종가를 진입 가격으로 사용합니다. "
+            "보다 현실적인 검증을 위해 CSV에 open 열을 포함해 주세요."
+        )
+        use_open_price = False
+    else:
+        st.info(
+            f"왕복 거래 비용 추정치: {round_trip_cost_pct:.2f}% "
+            "(실제 증권사 수수료·세금·체결 오차와 다를 수 있습니다.)"
+        )
+        use_open_price = True
+
     rows = []
-
-    # 검색 화면과 동일한 조건으로 과거 신호를 검증합니다.
     min_value_won = min_value * 100_000_000
+    cost_decimal = round_trip_cost_pct / 100
 
+    # 검색 화면과 동일한 신호·거래량 배수·거래대금 조건을 사용합니다.
     for ticker, g in data.groupby("ticker"):
         g = g.sort_values("date").reset_index(drop=True)
 
-        for i in range(len(g) - holding_days - 1):
+        # 진입은 다음 거래일, 청산은 진입일을 포함한 보유 기간의 마지막 날 종가입니다.
+        for i in range(max(0, len(g) - holding_days)):
             row = g.iloc[i]
 
-            # 선택한 검색기의 기본 조건
             if not bool(row[signal_col]):
                 continue
-
-            # 화면에서 설정한 거래량 조건
-            if pd.isna(row["volume_ratio"]):
+            if pd.isna(row["volume_ratio"]) or row["volume_ratio"] < volume_threshold:
                 continue
-            if row["volume_ratio"] < volume_threshold:
-                continue
-
-            # 화면에서 설정한 최소 거래대금 조건
             if pd.isna(row["value"]) or row["value"] < min_value_won:
                 continue
 
-            # 신호 다음 거래일 종가를 진입 가격으로 가정
             entry_i = i + 1
-            exit_i = entry_i + holding_days
+            exit_i = entry_i + holding_days - 1
+            if exit_i >= len(g):
+                continue
 
-            entry = g.loc[entry_i, "close"]
+            if use_open_price:
+                entry = g.loc[entry_i, "open"]
+                # 다음 거래일 시가가 누락된 경우 해당 신호는 제외합니다.
+                if pd.isna(entry) or entry <= 0:
+                    continue
+            else:
+                entry = g.loc[entry_i, "close"]
+
             exit_price = g.loc[exit_i, "close"]
-
             if pd.isna(entry) or pd.isna(exit_price) or entry <= 0:
                 continue
 
+            gross_return = exit_price / entry - 1
+            net_return = gross_return - cost_decimal
+
             rows.append({
                 "종목명": row["name"],
+                "종목코드": row["ticker"],
                 "신호일": row["date"],
                 "진입일": g.loc[entry_i, "date"],
                 "청산일": g.loc[exit_i, "date"],
                 "진입가": entry,
                 "청산가": exit_price,
-                "수익률(%)": (exit_price / entry - 1) * 100,
+                "수익률(비용 전, %)": gross_return * 100,
+                "수익률(비용 후, %)": net_return * 100,
             })
-            
 
     bt = pd.DataFrame(rows)
 
     if bt.empty:
         st.info(
-            "검증할 신호가 충분하지 않습니다. "
-            "더 많은 과거 데이터를 업로드해 주세요."
+            "검증할 신호가 없습니다. 거래량 배수나 최소 거래대금을 낮추거나, "
+            "더 많은 과거 데이터를 사용해 보세요."
         )
     else:
-        avg = bt["수익률(%)"].mean()
-        win = (bt["수익률(%)"] > 0).mean() * 100
-        median = bt["수익률(%)"].median()
+        returns = bt["수익률(비용 후, %)"].astype(float)
+        avg = returns.mean()
+        median = returns.median()
+        win = (returns > 0).mean() * 100
+        avg_win = returns[returns > 0].mean()
+        avg_loss = returns[returns < 0].mean()
+        if pd.notna(avg_win) and pd.notna(avg_loss) and avg_loss != 0:
+            payoff = avg_win / abs(avg_loss)
+            payoff_text = f"{payoff:.2f}"
+        else:
+            payoff_text = "계산 불가"
+        expectancy = avg
 
         a, b, c = st.columns(3)
-        a.metric("신호 수", f"{len(bt):,}")
-        b.metric("평균 수익률", f"{avg:.2f}%")
-        c.metric("양수 수익률 비율", f"{win:.1f}%")
+        a.metric("검증 거래 수", f"{len(bt):,}")
+        b.metric("평균 수익률(비용 후)", f"{avg:.2f}%")
+        c.metric("승률(비용 후)", f"{win:.1f}%")
 
-        st.write(f"중앙값 수익률: **{median:.2f}%**")
+        d, e, f = st.columns(3)
+        d.metric("중앙값 수익률", f"{median:.2f}%")
+        e.metric("평균 이익 거래", f"{avg_win:.2f}%" if pd.notna(avg_win) else "해당 없음")
+        f.metric("평균 손실 거래", f"{avg_loss:.2f}%" if pd.notna(avg_loss) else "해당 없음")
+
+        st.write(f"손익비(평균 이익 ÷ 평균 손실 절댓값): **{payoff_text}**")
+        st.write(f"거래당 평균 기대수익(비용 후): **{expectancy:.2f}%**")
+        st.caption(
+            "주의: 이는 각 신호의 단순 수익률 통계입니다. 여러 종목의 동시 보유, "
+            "포트폴리오 비중, 손절 규칙, 실제 세금·수수료, 시장 대비 성과는 아직 반영하지 않았습니다. "
+            "같은 종목에서 보유 기간이 겹치는 신호도 별도 거래로 집계됩니다."
+        )
         st.dataframe(bt, use_container_width=True, hide_index=True)
 
         st.download_button(
