@@ -179,25 +179,43 @@ with st.sidebar:
         )
 
     elif source == "실제 국내 주식 데이터":
-        try:
+         try:
             stock_list = load_krx_stocks()
 
             stock_names = dict(
                 zip(stock_list["Code"], stock_list["Name"])
             )
 
-            defaults = [
-                code for code in ["005930", "000660", "005380"]
-                if code in stock_names
-            ]
+            all_codes = list(stock_names.keys())
 
-            selected_codes = st.multiselect(
-                "분석할 종목 선택",
-                options=list(stock_names.keys()),
-                default=defaults,
-                format_func=lambda code:
-                    f"{stock_names[code]} ({code})"
+            analyze_all = st.checkbox(
+                "전체 종목 검색하기",
+                value=False,
+                help="전체 국내 상장 종목을 분석합니다. 종목 수에 따라 시간이 오래 걸릴 수 있습니다."
             )
+
+            if analyze_all:
+                selected_codes = all_codes
+                st.caption(
+                    f"전체 분석 대상: {len(selected_codes):,}개 종목"
+                )
+            else:
+                defaults = [
+                    code for code in ["005930", "000660", "005380"]
+                    if code in stock_names
+                ]
+
+                selected_codes = st.multiselect(
+                    "분석할 종목 선택",
+                    options=all_codes,
+                    default=defaults,
+                    format_func=lambda code:
+                        f"{stock_names[code]} ({code})"
+                )
+
+                st.caption(
+                    f"선택한 종목: {len(selected_codes):,}개"
+                )
 
             years = st.selectbox(
                 "과거 데이터 기간",
