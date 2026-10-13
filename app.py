@@ -179,7 +179,8 @@ with st.sidebar:
         )
 
     elif source == "실제 국내 주식 데이터":
-         try:
+
+        try:
             stock_list = load_krx_stocks()
 
             stock_names = dict(
@@ -216,6 +217,7 @@ with st.sidebar:
                 st.caption(
                     f"선택한 종목: {len(selected_codes):,}개"
                 )
+
 
             years = st.selectbox(
                 "과거 데이터 기간",
