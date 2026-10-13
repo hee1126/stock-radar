@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 
 import FinanceDataReader as fdr
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 @st.cache_data(ttl=3600)
@@ -41,13 +42,13 @@ def load_real_stock(code, name, start_date):
     return prices
 
 st.set_page_config(
-    page_title="주식 레이더",
+    page_title="주식 레이더 V4",
     page_icon="📡",
     layout="wide"
 )
 
 st.title("📡 주식 레이더")
-st.caption("국내 주식 검색기 · 기술적 분석 · 과거 성과 검증")
+st.caption("국내 주식 검색기 · 기술적 분석 · 과거 성과 검증 · 병렬 시세 조회")
 
 st.warning(
     "투자 참고용 실험 도구입니다. "
@@ -293,21 +294,36 @@ try:
         progress = st.progress(0)
         status = st.empty()
 
-        for i, code in enumerate(selected_codes):
+        # 종목을 하나씩 조회하는 대신 제한된 수의 작업을 병렬 실행합니다.
+        # 너무 많은 동시 요청은 데이터 제공처의 제한을 유발할 수 있어 6개로 제한합니다.
+        max_workers = min(6, len(selected_codes))
+
+        def fetch_one(code):
             name = stock_names[code]
-            status.write(
-                f"실제 시세 조회 중 {i + 1:,}/{len(selected_codes):,}: {name} ({code})"
-            )
             try:
                 prices = load_real_stock(code, name, start_date)
-                if not prices.empty:
+                if prices is None or prices.empty:
+                    return code, name, None, "시세 데이터 없음"
+                return code, name, prices, None
+            except Exception as exc:
+                return code, name, None, str(exc)[:160]
+
+        completed = 0
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(fetch_one, code) for code in selected_codes]
+            for future in as_completed(futures):
+                code, name, prices, error = future.result()
+                completed += 1
+                if prices is not None:
                     frames.append(prices)
                 else:
-                    failed_codes.append((code, name, "시세 데이터 없음"))
-            except Exception as exc:
-                failed_codes.append((code, name, str(exc)[:160]))
+                    failed_codes.append((code, name, error or "알 수 없는 오류"))
 
-            progress.progress((i + 1) / len(selected_codes))
+                status.write(
+                    f"시세 조회 중: {completed:,}/{len(selected_codes):,} 완료 · "
+                    f"최근 완료 종목: {name} ({code})"
+                )
+                progress.progress(completed / len(selected_codes))
 
         progress.empty()
         status.empty()
