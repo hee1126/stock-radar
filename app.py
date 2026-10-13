@@ -291,7 +291,7 @@ try:
         progress = st.progress(0.0)
         status = st.empty()
         detail = st.empty()
-
+        live_results_box = st.empty()
         for i, code in enumerate(selected_codes, start=1):
             name = stock_names[code]
 
@@ -361,7 +361,7 @@ try:
                         partial_results["value"] / 100_000_000
                     ).round(1)
 
-                    detail.dataframe(
+                    live_results_box.dataframe(
                         partial_results[
                             [
                                 "name", "ticker", "date", "close",
@@ -377,7 +377,7 @@ try:
                         hide_index=True
                     )
                 else:
-                    detail.info("아직 분석 가능한 시세 데이터가 없습니다.")
+                    live_results_box.info("아직 분석 가능한 시세 데이터가 없습니다.")
 
         if not frames:
             st.error(
