@@ -284,35 +284,70 @@ try:
         )
 
         frames = []
-        progress = st.progress(0)
-        status = st.empty()
+        failed_stocks = []
+        completed_names = []
 
-        for i, code in enumerate(selected_codes):
+        total = len(selected_codes)
+        progress = st.progress(0.0)
+        status = st.empty()
+        detail = st.empty()
+
+        for i, code in enumerate(selected_codes, start=1):
             name = stock_names[code]
 
             status.write(
-                f"실제 시세 조회 중: {name} ({code})"
+                f"📡 시세 조회 중: {name} ({code}) "
+                f"— {i:,}/{total:,}개 "
+                f"({i / total * 100:.1f}%)"
             )
 
-            prices = load_real_stock(code, name, start_date)
+            try:
+                prices = load_real_stock(code, name, start_date)
 
-            if not prices.empty:
-                frames.append(prices)
+                if not prices.empty:
+                    frames.append(prices)
+                    completed_names.append(name)
+                else:
+                    failed_stocks.append(
+                        f"{name} ({code}): 시세 데이터 없음"
+                    )
 
-            progress.progress((i + 1) / len(selected_codes))
+            except Exception as e:
+                failed_stocks.append(
+                    f"{name} ({code}): {str(e)[:200]}"
+                )
 
-        progress.empty()
-        status.empty()
+            progress.progress(i / total)
+
+            detail.info(
+                f"조회 완료: {i:,}/{total:,}개 · "
+                f"데이터 확보: {len(frames):,}개 종목 · "
+                f"실패 또는 데이터 없음: {len(failed_stocks):,}개"
+            )
 
         if not frames:
             st.error(
                 "시세를 가져오지 못했습니다. "
                 "잠시 후 다시 시도하거나 다른 종목을 선택해 주세요."
             )
+            if failed_stocks:
+                with st.expander("조회 실패 상세"):
+                    st.write(failed_stocks[:100])
             st.stop()
 
         raw = pd.concat(frames, ignore_index=True)
         is_demo = False
+
+        if failed_stocks:
+            with st.expander(
+                f"조회 실패 또는 데이터 없음: {len(failed_stocks):,}개"
+            ):
+                st.write(failed_stocks[:100])
+
+        status.success(
+            f"시세 조회 완료! 데이터 확보: {len(frames):,}개 종목"
+        )
+        detail.empty()
 
     data = prepare_data(raw)
 
