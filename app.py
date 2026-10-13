@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 
 import FinanceDataReader as fdr
-
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 @st.cache_data(ttl=3600)
 def load_krx_stocks():
@@ -292,38 +292,52 @@ try:
         status = st.empty()
         detail = st.empty()
         live_results_box = st.empty()
-        for i, code in enumerate(selected_codes, start=1):
-            name = stock_names[code]
+        
+# 종목별 시세 조회 작업 준비
+def fetch_stock(code):
+    name = stock_names[code]
+    try:
+        prices = load_real_stock(code, name, start_date)
+        return code, name, prices, None
+    except Exception as e:
+        return code, name, pd.DataFrame(), str(e)[:200]
 
-            status.write(
-                f"📡 시세 조회 중: {name} ({code}) "
-                f"— {i:,}/{total:,}개 "
-                f"({i / total * 100:.1f}%)"
+
+with ThreadPoolExecutor(max_workers=4) as executor:
+    futures = {
+        executor.submit(fetch_stock, code): code
+        for code in selected_codes
+    }
+
+    for i, future in enumerate(as_completed(futures), start=1):
+        code, name, prices, error = future.result()
+
+        status.write(
+            f"📡 시세 조회 중: {name} ({code}) "
+            f"— {i:,}/{total:,}개 "
+            f"({i / total * 100:.1f}%)"
+        )
+
+        if error:
+            failed_stocks.append(f"{name} ({code}): {error}")
+        elif not prices.empty:
+            frames.append(prices)
+            completed_names.append(name)
+        else:
+            failed_stocks.append(
+                f"{name} ({code}): 시세 데이터 없음"
             )
 
-            try:
-                prices = load_real_stock(code, name, start_date)
+        progress.progress(i / total)
 
-                if not prices.empty:
-                    frames.append(prices)
-                    completed_names.append(name)
-                else:
-                    failed_stocks.append(
-                        f"{name} ({code}): 시세 데이터 없음"
-                    )
+        detail.info(
+            f"조회 완료: {i:,}/{total:,}개 · "
+            f"데이터 확보: {len(frames):,}개 종목 · "
+            f"실패 또는 데이터 없음: {len(failed_stocks):,}개"
+        )
 
-            except Exception as e:
-                failed_stocks.append(
-                    f"{name} ({code}): {str(e)[:200]}"
-                )
-
-            progress.progress(i / total)
-
-            detail.info(
-                f"조회 완료: {i:,}/{total:,}개 · "
-                f"데이터 확보: {len(frames):,}개 종목 · "
-                f"실패 또는 데이터 없음: {len(failed_stocks):,}개"
-            )
+        # 기존에 추가한 중간 결과 표 갱신 코드는
+        # 이 위치에 그대로 유지하세요.
 
             # 조회가 끝난 종목들의 최신 데이터로 중간 검색 결과 표시
             if i % 10 == 0 or i == total:
