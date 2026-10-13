@@ -4,6 +4,7 @@ import numpy as np
 
 import FinanceDataReader as fdr
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import lru_cache
 
 
 @st.cache_data(ttl=3600)
@@ -15,7 +16,7 @@ def load_krx_stocks():
     return stocks[["Code", "Name", "Market"]].drop_duplicates()
 
 
-@st.cache_data(ttl=1800)
+@lru_cache(maxsize=1000)
 def load_real_stock(code, name, start_date):
     """종목의 과거 일별 시세를 가져옵니다."""
     prices = fdr.DataReader(code, start_date)
@@ -39,7 +40,8 @@ def load_real_stock(code, name, start_date):
     # 거래대금의 정확한 제공값이 없을 때 사용하는 추정치
     prices["value"] = prices["close"] * prices["volume"]
 
-    return prices
+    # 캐시된 DataFrame을 호출부에서 실수로 변경하지 않도록 복사본 반환
+    return prices.copy()
 
 st.set_page_config(
     page_title="주식 레이더 V4",
@@ -149,8 +151,8 @@ def prepare_data(df):
 
         # 검색기의 기본 조건과 사용자가 정한 거래량 배수 조건을 분리합니다.
         # 이렇게 해야 슬라이더 값이 검색과 검증 양쪽에 똑같이 적용됩니다.
-        g["volume_ratio"] = g["volume"] / g["vol20"]
-        g["value_ratio"] = g["value"] / g["value20"]
+        g["volume_ratio"] = g["volume"].div(g["vol20"].replace(0, np.nan))
+        g["value_ratio"] = g["value"].div(g["value20"].replace(0, np.nan))
         g["signal_A"] = g["close"] > g["ma5"]
         g["signal_B"] = (
             (g["close"] > g["ma20"])
@@ -345,6 +347,12 @@ try:
         is_demo = False
 
     data = prepare_data(raw)
+    if data.empty:
+        st.error(
+            "분석할 수 있는 유효한 시세 데이터가 없습니다. "
+            "선택 종목의 시세가 제공되는지 또는 CSV의 날짜·종가·거래량 열을 확인해 주세요."
+        )
+        st.stop()
 
 except Exception as e:
     st.error(f"데이터를 읽지 못했습니다: {e}")
@@ -420,7 +428,7 @@ with tab1:
                 "20일선", "60일선", "거래량 배수",
                 "거래대금(억원)"
             ]],
-            use_container_width=True,
+            width="stretch",
             hide_index=True
         )
         st.download_button(
@@ -554,7 +562,7 @@ with tab2:
             "포트폴리오 비중, 손절 규칙, 실제 세금·수수료, 시장 대비 성과는 아직 반영하지 않았습니다. "
             "같은 종목에서 보유 기간이 겹치는 신호도 별도 거래로 집계됩니다."
         )
-        st.dataframe(bt, use_container_width=True, hide_index=True)
+        st.dataframe(bt, width="stretch", hide_index=True)
 
         st.download_button(
             "검증 결과 CSV 다운로드",
@@ -592,4 +600,4 @@ with tab3:
         failed_df = pd.DataFrame(
             failed_codes, columns=["종목코드", "종목명", "사유"]
         )
-        st.dataframe(failed_df, use_container_width=True, hide_index=True)
+        st.dataframe(failed_df, width="stretch", hide_index=True)
