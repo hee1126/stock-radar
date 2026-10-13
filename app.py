@@ -3,8 +3,6 @@ import pandas as pd
 import numpy as np
 
 import FinanceDataReader as fdr
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from functools import lru_cache
 
 
 @st.cache_data(ttl=3600)
@@ -16,7 +14,7 @@ def load_krx_stocks():
     return stocks[["Code", "Name", "Market"]].drop_duplicates()
 
 
-@lru_cache(maxsize=1000)
+@st.cache_data(ttl=1800)
 def load_real_stock(code, name, start_date):
     """종목의 과거 일별 시세를 가져옵니다."""
     prices = fdr.DataReader(code, start_date)
@@ -40,17 +38,16 @@ def load_real_stock(code, name, start_date):
     # 거래대금의 정확한 제공값이 없을 때 사용하는 추정치
     prices["value"] = prices["close"] * prices["volume"]
 
-    # 캐시된 DataFrame을 호출부에서 실수로 변경하지 않도록 복사본 반환
-    return prices.copy()
+    return prices
 
 st.set_page_config(
-    page_title="주식 레이더 V4",
+    page_title="주식 레이더",
     page_icon="📡",
     layout="wide"
 )
 
 st.title("📡 주식 레이더")
-st.caption("국내 주식 검색기 · 기술적 분석 · 과거 성과 검증 · 병렬 시세 조회")
+st.caption("국내 주식 검색기 · 기술적 분석 · 과거 성과 검증")
 
 st.warning(
     "투자 참고용 실험 도구입니다. "
@@ -125,14 +122,8 @@ def prepare_data(df):
     df = df.sort_values(["ticker", "date"])
     df = df.drop_duplicates(["ticker", "date"], keep="last")
 
-    # open은 다음 거래일 진입 가격에 사용합니다. CSV에 없어도 앱은 실행됩니다.
-    if "open" in df.columns:
-        df["open"] = pd.to_numeric(df["open"], errors="coerce")
-
     if "value" in df.columns:
         df["value"] = pd.to_numeric(df["value"], errors="coerce")
-        # 거래대금이 비어 있는 행은 종가×거래량으로 추정합니다.
-        df["value"] = df["value"].fillna(df["close"] * df["volume"])
     else:
         # 거래대금 실제 값이 없으면 종가×거래량으로 추정합니다.
         df["value"] = df["close"] * df["volume"]
@@ -144,23 +135,24 @@ def prepare_data(df):
         g["ma5"] = g["close"].rolling(5).mean()
         g["ma20"] = g["close"].rolling(20).mean()
         g["ma60"] = g["close"].rolling(60).mean()
-        # 당일을 제외한 직전 20거래일 평균을 기준으로 사용합니다.
-        g["vol20"] = g["volume"].shift(1).rolling(20).mean()
-        g["value20"] = g["value"].shift(1).rolling(20).mean()
+        g["vol20"] = g["volume"].rolling(20).mean()
+        g["value20"] = g["value"].rolling(20).mean()
         g["high20"] = g["close"].shift(1).rolling(20).max()
 
-        # 검색기의 기본 조건과 사용자가 정한 거래량 배수 조건을 분리합니다.
-        # 이렇게 해야 슬라이더 값이 검색과 검증 양쪽에 똑같이 적용됩니다.
-        g["volume_ratio"] = g["volume"].div(g["vol20"].replace(0, np.nan))
-        g["value_ratio"] = g["value"].div(g["value20"].replace(0, np.nan))
-        g["signal_A"] = g["close"] > g["ma5"]
+        # 과거 데이터만으로 신호를 계산합니다.
+        g["volume_ratio"] = g["volume"] / g["vol20"]
+        g["value_ratio"] = g["value"] / g["value20"]
+        g["signal_A"] = (
+            (g["volume_ratio"] >= 2)
+            & (g["close"] > g["ma5"])
+        )
         g["signal_B"] = (
             (g["close"] > g["ma20"])
             & (g["ma5"] > g["ma20"])
             & (g["ma20"] > g["ma60"])
             & (g["close"] > g["high20"])
         )
-        g["signal_C"] = (
+        g["signal_C"] = g["signal_A"] & (
             (g["ma5"] > g["ma20"])
             & (g["close"] > g["ma20"])
         )
@@ -194,29 +186,18 @@ with st.sidebar:
                 zip(stock_list["Code"], stock_list["Name"])
             )
 
-            all_codes = list(stock_names.keys())
-            analyze_all = st.checkbox(
-                "전체 종목 분석",
-                value=False,
-                help="종목 목록에 있는 모든 코드를 조회합니다. 종목 수가 많으면 오래 걸릴 수 있습니다."
-            )
+            defaults = [
+                code for code in ["005930", "000660", "005380"]
+                if code in stock_names
+            ]
 
-            if analyze_all:
-                selected_codes = all_codes
-                st.caption(f"전체 분석 대상: {len(selected_codes):,}개 종목")
-            else:
-                defaults = [
-                    code for code in ["005930", "000660", "005380"]
-                    if code in stock_names
-                ]
-                selected_codes = st.multiselect(
-                    "분석할 종목 선택",
-                    options=all_codes,
-                    default=defaults,
-                    format_func=lambda code:
-                        f"{stock_names[code]} ({code})"
-                )
-                st.caption(f"선택한 종목: {len(selected_codes):,}개")
+            selected_codes = st.multiselect(
+                "분석할 종목 선택",
+                options=list(stock_names.keys()),
+                default=defaults,
+                format_func=lambda code:
+                    f"{stock_names[code]} ({code})"
+            )
 
             years = st.selectbox(
                 "과거 데이터 기간",
@@ -260,15 +241,6 @@ with st.sidebar:
         index=2
     )
 
-    round_trip_cost_pct = st.number_input(
-        "왕복 거래 비용 추정치 (%)",
-        min_value=0.0,
-        max_value=3.0,
-        value=0.3,
-        step=0.05,
-        help="매수·매도 수수료, 세금, 슬리피지를 합친 사용자의 추정치입니다. 실제 비용에 맞게 조정하세요."
-    )
-
 try:
     if source == "가상 데모 데이터":
         raw = make_demo_data()
@@ -292,49 +264,25 @@ try:
         )
 
         frames = []
-        failed_codes = []
         progress = st.progress(0)
         status = st.empty()
 
-        # 종목을 하나씩 조회하는 대신 제한된 수의 작업을 병렬 실행합니다.
-        # 너무 많은 동시 요청은 데이터 제공처의 제한을 유발할 수 있어 6개로 제한합니다.
-        max_workers = min(6, len(selected_codes))
-
-        def fetch_one(code):
+        for i, code in enumerate(selected_codes):
             name = stock_names[code]
-            try:
-                prices = load_real_stock(code, name, start_date)
-                if prices is None or prices.empty:
-                    return code, name, None, "시세 데이터 없음"
-                return code, name, prices, None
-            except Exception as exc:
-                return code, name, None, str(exc)[:160]
 
-        completed = 0
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(fetch_one, code) for code in selected_codes]
-            for future in as_completed(futures):
-                code, name, prices, error = future.result()
-                completed += 1
-                if prices is not None:
-                    frames.append(prices)
-                else:
-                    failed_codes.append((code, name, error or "알 수 없는 오류"))
+            status.write(
+                f"실제 시세 조회 중: {name} ({code})"
+            )
 
-                status.write(
-                    f"시세 조회 중: {completed:,}/{len(selected_codes):,} 완료 · "
-                    f"최근 완료 종목: {name} ({code})"
-                )
-                progress.progress(completed / len(selected_codes))
+            prices = load_real_stock(code, name, start_date)
+
+            if not prices.empty:
+                frames.append(prices)
+
+            progress.progress((i + 1) / len(selected_codes))
 
         progress.empty()
         status.empty()
-        st.session_state["stock_radar_failed_codes"] = failed_codes
-        if failed_codes:
-            st.warning(
-                f"{len(failed_codes):,}개 종목의 시세를 가져오지 못했습니다. "
-                "데이터 안내 탭에서 실패 종목을 확인할 수 있습니다."
-            )
 
         if not frames:
             st.error(
@@ -347,12 +295,6 @@ try:
         is_demo = False
 
     data = prepare_data(raw)
-    if data.empty:
-        st.error(
-            "분석할 수 있는 유효한 시세 데이터가 없습니다. "
-            "선택 종목의 시세가 제공되는지 또는 CSV의 날짜·종가·거래량 열을 확인해 주세요."
-        )
-        st.stop()
 
 except Exception as e:
     st.error(f"데이터를 읽지 못했습니다: {e}")
@@ -366,14 +308,8 @@ st.caption(
     "데이터 제공처와 거래대금 단위를 확인하세요."
 )
 
-# 종목별 가장 최근에 확보된 거래일을 기준으로 검색합니다.
-latest = (
-    data.sort_values(["ticker", "date"])
-        .groupby("ticker", sort=False, as_index=False)
-        .tail(1)
-        .copy()
-)
-latest_date = latest["date"].max()
+latest_date = data["date"].max()
+latest = data[data["date"] == latest_date].copy()
 
 signal_col = {
     "A · 거래량 급증": "signal_A",
@@ -412,7 +348,6 @@ with tab1:
     results = results.rename(columns={
         "name": "종목명",
         "ticker": "종목코드",
-        "date": "기준일",
         "close": "종가",
         "ma5": "5일선",
         "ma20": "20일선",
@@ -424,11 +359,11 @@ with tab1:
     else:
         st.dataframe(
             results[[
-                "종목명", "종목코드", "기준일", "종가", "5일선",
+                "종목명", "종목코드", "종가", "5일선",
                 "20일선", "60일선", "거래량 배수",
                 "거래대금(억원)"
             ]],
-            width="stretch",
+            use_container_width=True,
             hide_index=True
         )
         st.download_button(
@@ -455,114 +390,76 @@ with tab1:
 with tab2:
     st.subheader("검색 신호 이후의 과거 수익률")
     st.caption(
-        "신호가 발생한 다음 거래일의 시가를 진입 가격으로 사용하고, "
-        "설정한 보유 거래일 수에 맞춰 청산합니다. "
-        "왕복 거래 비용은 입력한 추정치를 단순 차감합니다."
+        "신호가 발생한 종가에 매수했다고 가정한 단순 계산입니다. "
+        "실제 체결 가능 가격, 수수료, 세금, 슬리피지는 "
+        "반영하지 않습니다."
     )
 
-    if "open" not in data.columns or data["open"].isna().all():
-        st.warning(
-            "데이터에 시가(open)가 없어 다음 거래일 종가를 진입 가격으로 사용합니다. "
-            "보다 현실적인 검증을 위해 CSV에 open 열을 포함해 주세요."
-        )
-        use_open_price = False
-    else:
-        st.info(
-            f"왕복 거래 비용 추정치: {round_trip_cost_pct:.2f}% "
-            "(실제 증권사 수수료·세금·체결 오차와 다를 수 있습니다.)"
-        )
-        use_open_price = True
-
     rows = []
-    min_value_won = min_value * 100_000_000
-    cost_decimal = round_trip_cost_pct / 100
 
-    # 검색 화면과 동일한 신호·거래량 배수·거래대금 조건을 사용합니다.
+    # 검색 화면과 동일한 조건으로 과거 신호를 검증합니다.
+    min_value_won = min_value * 100_000_000
+
     for ticker, g in data.groupby("ticker"):
         g = g.sort_values("date").reset_index(drop=True)
 
-        # 진입은 다음 거래일, 청산은 진입일을 포함한 보유 기간의 마지막 날 종가입니다.
-        for i in range(max(0, len(g) - holding_days)):
+        for i in range(len(g) - holding_days - 1):
             row = g.iloc[i]
 
+            # 선택한 검색기의 기본 조건
             if not bool(row[signal_col]):
                 continue
-            if pd.isna(row["volume_ratio"]) or row["volume_ratio"] < volume_threshold:
+
+            # 화면에서 설정한 거래량 조건
+            if pd.isna(row["volume_ratio"]):
                 continue
+            if row["volume_ratio"] < volume_threshold:
+                continue
+
+            # 화면에서 설정한 최소 거래대금 조건
             if pd.isna(row["value"]) or row["value"] < min_value_won:
                 continue
 
+            # 신호 다음 거래일 종가를 진입 가격으로 가정
             entry_i = i + 1
-            exit_i = entry_i + holding_days - 1
-            if exit_i >= len(g):
-                continue
+            exit_i = entry_i + holding_days
 
-            if use_open_price:
-                entry = g.loc[entry_i, "open"]
-                # 다음 거래일 시가가 누락된 경우 해당 신호는 제외합니다.
-                if pd.isna(entry) or entry <= 0:
-                    continue
-            else:
-                entry = g.loc[entry_i, "close"]
-
+            entry = g.loc[entry_i, "close"]
             exit_price = g.loc[exit_i, "close"]
+
             if pd.isna(entry) or pd.isna(exit_price) or entry <= 0:
                 continue
 
-            gross_return = exit_price / entry - 1
-            net_return = gross_return - cost_decimal
-
             rows.append({
                 "종목명": row["name"],
-                "종목코드": row["ticker"],
                 "신호일": row["date"],
                 "진입일": g.loc[entry_i, "date"],
                 "청산일": g.loc[exit_i, "date"],
                 "진입가": entry,
                 "청산가": exit_price,
-                "수익률(비용 전, %)": gross_return * 100,
-                "수익률(비용 후, %)": net_return * 100,
+                "수익률(%)": (exit_price / entry - 1) * 100,
             })
+            
 
     bt = pd.DataFrame(rows)
 
     if bt.empty:
         st.info(
-            "검증할 신호가 없습니다. 거래량 배수나 최소 거래대금을 낮추거나, "
-            "더 많은 과거 데이터를 사용해 보세요."
+            "검증할 신호가 충분하지 않습니다. "
+            "더 많은 과거 데이터를 업로드해 주세요."
         )
     else:
-        returns = bt["수익률(비용 후, %)"].astype(float)
-        avg = returns.mean()
-        median = returns.median()
-        win = (returns > 0).mean() * 100
-        avg_win = returns[returns > 0].mean()
-        avg_loss = returns[returns < 0].mean()
-        if pd.notna(avg_win) and pd.notna(avg_loss) and avg_loss != 0:
-            payoff = avg_win / abs(avg_loss)
-            payoff_text = f"{payoff:.2f}"
-        else:
-            payoff_text = "계산 불가"
-        expectancy = avg
+        avg = bt["수익률(%)"].mean()
+        win = (bt["수익률(%)"] > 0).mean() * 100
+        median = bt["수익률(%)"].median()
 
         a, b, c = st.columns(3)
-        a.metric("검증 거래 수", f"{len(bt):,}")
-        b.metric("평균 수익률(비용 후)", f"{avg:.2f}%")
-        c.metric("승률(비용 후)", f"{win:.1f}%")
+        a.metric("신호 수", f"{len(bt):,}")
+        b.metric("평균 수익률", f"{avg:.2f}%")
+        c.metric("양수 수익률 비율", f"{win:.1f}%")
 
-        d, e, f = st.columns(3)
-        d.metric("중앙값 수익률", f"{median:.2f}%")
-        e.metric("평균 이익 거래", f"{avg_win:.2f}%" if pd.notna(avg_win) else "해당 없음")
-        f.metric("평균 손실 거래", f"{avg_loss:.2f}%" if pd.notna(avg_loss) else "해당 없음")
-
-        st.write(f"손익비(평균 이익 ÷ 평균 손실 절댓값): **{payoff_text}**")
-        st.write(f"거래당 평균 기대수익(비용 후): **{expectancy:.2f}%**")
-        st.caption(
-            "주의: 이는 각 신호의 단순 수익률 통계입니다. 여러 종목의 동시 보유, "
-            "포트폴리오 비중, 손절 규칙, 실제 세금·수수료, 시장 대비 성과는 아직 반영하지 않았습니다. "
-            "같은 종목에서 보유 기간이 겹치는 신호도 별도 거래로 집계됩니다."
-        )
-        st.dataframe(bt, width="stretch", hide_index=True)
+        st.write(f"중앙값 수익률: **{median:.2f}%**")
+        st.dataframe(bt, use_container_width=True, hide_index=True)
 
         st.download_button(
             "검증 결과 CSV 다운로드",
@@ -594,10 +491,3 @@ with tab3:
         "주의: 거래대금(value)은 원 단위로 입력해야 합니다. "
         "거래대금 열이 없으면 종가×거래량으로 추정합니다."
     )
-    failed_codes = st.session_state.get("stock_radar_failed_codes", [])
-    if failed_codes:
-        st.subheader("시세 조회 실패 종목")
-        failed_df = pd.DataFrame(
-            failed_codes, columns=["종목코드", "종목명", "사유"]
-        )
-        st.dataframe(failed_df, width="stretch", hide_index=True)
